@@ -1,6 +1,30 @@
-datasets>=2.14.0,<3.0.0
-transformers>=4.30.0
+# All-in-one requirements file for the project
+# Install with: pip install -r requirements.txt
+
+# Core ML and NLP libraries
 torch>=2.0.0
-scikit-learn>=1.3.0
-numpy>=1.24.0
+transformers>=4.30.0
+sentence-transformers>=2.7.0
 accelerate>=0.20.0
+
+# Dataset handling
+datasets>=2.20.0
+huggingface-hub>=0.20.0,<1.0.0
+
+# Vector database
+qdrant-client>=1.7.0
+
+# Data processing and utilities
+numpy>=1.24.0,<2.0.0
+scikit-learn>=1.3.0
+tqdm>=4.65.0
+
+# Environment variable management
+python-dotenv>=1.0.0
+
+# Visualization (for evaluation scripts)
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Optional but recommended for better tokenization
+tiktoken>=0.5.0
