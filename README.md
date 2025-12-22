@@ -278,7 +278,8 @@ The RAG (Retrieval-Augmented Generation) Engine is a complete question-answering
 3. Retrieves relevant context from the Qdrant knowledge base
 4. Processes retrieved chunks (cleaning, deduplication, ordering, merging)
 5. Generates factually grounded answers using GPT-4o-mini
-6. Falls back to general knowledge if retrieved context is insufficient
+6. Uses a hybrid failure detector (rules + LLM verifier) to decide if grounding is insufficient
+7. Falls back to general knowledge if retrieved context is insufficient
 
 ### Components
 
@@ -325,7 +326,7 @@ The RAG engine is split into two main files:
 - `retrieve_context()`: Retrieves relevant context based on query and intent
 - `generate_grounded_answer()`: Generates strictly grounded answer using custom RAG prompt
 - `generate_fallback_answer()`: Generates answer using general knowledge (fallback mode)
-- `detect_failure_signals()`: Detects failure signals in RAG answer
+- `detect_failure_signals()`: Hybrid failure detection (rules + LLM verifier for support)
 - `answer_query()`: Complete RAG pipeline execution
 
 ### Intent-Based Retrieval Strategies
@@ -409,7 +410,8 @@ print(f"Fallback used: {response['fallback_used']}")
 
 5. **Answer Generation**:
    - **Grounded Mode**: If sufficient context is retrieved, GPT-4o-mini generates an answer strictly based on the retrieved context
-   - **Fallback Mode**: If context is insufficient, GPT-4o-mini uses its general knowledge
+   - **Hybrid Failure Detection**: A combined rule-based and LLM verifier checks if the grounded answer is fully supported by the retrieved context. Signals include short/empty context, explicit failure phrases, missing citations, and an LLM verdict of PARTIALLY_SUPPORTED or UNSUPPORTED.
+   - **Fallback Mode**: If the detector flags issues, GPT-4o-mini uses its general knowledge
 
 6. **Response**: Returns the answer along with metadata about intent, retrieval, and generation
 
@@ -437,21 +439,21 @@ Answer:
 Reinforcement learning is a type of machine learning where an agent learns to make decisions by interacting with an environment. The agent receives rewards or penalties for its actions and learns to maximize cumulative rewards over time...
 ```
 
-### Fallback Mechanism
+### Hybrid Failure Detection & Fallback
 
-The system automatically uses fallback mode when any of these conditions are met:
-- The grounded answer contains: "The answer is not found in the provided context"
-- The grounded answer contains: "Additional information required"
-- Retrieved context is too short (< 150 characters)
+**Rule-based signals**:
+- Explicit failure phrases in the grounded answer (e.g., "The answer is not found in the provided context", "Additional information required")
+- Retrieved context too short/empty (< 150 chars)
+- Missing citations (soft signal)
 
-**How it works**:
-1. First, the system generates a strictly grounded answer using the custom RAG prompt
-2. The system checks for failure signals in the generated answer
-3. If failure signals are detected, it automatically switches to fallback mode
-4. Fallback mode uses GPT-4o-mini's general knowledge without strict grounding constraints
-5. The original grounded answer is preserved in the response for reference
+**LLM verifier**:
+- Evaluates if the grounded answer is SUPPORTED, PARTIALLY_SUPPORTED, or UNSUPPORTED by the retrieved context.
+- If verdict is PARTIALLY_SUPPORTED or UNSUPPORTED, fallback is triggered.
 
-In fallback mode, GPT-4o-mini provides answers using its general knowledge, ensuring users always get a response even when the knowledge base doesn't contain relevant information.
+**Flow**:
+1. Generate grounded answer with strict prompt.
+2. Run hybrid detector (rules + verifier).
+3. If flagged, switch to fallback (general knowledge) and preserve the grounded answer in the response for reference.
 
 ---
 
@@ -512,6 +514,14 @@ In fallback mode, GPT-4o-mini provides answers using its general knowledge, ensu
    # Or directly with Python
    python3 rag_engine.py --query "What is artificial intelligence?"
    ```
+
+7. **Streamlit UI (Optional frontend)**:
+```bash
+cd Project
+source venv/bin/activate
+streamlit run streamlit_app.py
+```
+Open the provided URL, enter a question, and optionally enable "Show debug details" to inspect intent, fallback status, retrieved chunks, and sources. The UI calls `RAGEngine.answer_query()` directly and shows the final answer by default.
 
 ### Typical Workflow
 
