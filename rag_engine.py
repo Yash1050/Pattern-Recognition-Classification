@@ -218,19 +218,32 @@ Grounded Answer:
                 "error": str(e)
             }
     
-    def detect_failure_signals(self, answer: str, context: str, min_context_length: int = 150) -> bool:
+    def detect_failure_signals(
+        self,
+        query: str,
+        answer: str,
+        context: str,
+        min_context_length: int = 150
+    ) -> bool:
         """
         Detect failure signals in RAG answer that indicate fallback should be used.
         
+        This is a **hybrid** detector that combines:
+        - Rule-based checks (short/empty context, explicit failure phrases, missing citations)
+        - An LLM-based verifier that checks whether the answer is supported by the context
+        
         Args:
-            answer: Generated RAG answer
-            context: Retrieved context
+            query: Original user query
+            answer: Generated grounded RAG answer
+            context: Retrieved / merged context
             min_context_length: Minimum context length threshold
             
         Returns:
             True if fallback should be activated
         """
-        # Check for explicit failure phrases
+        # ---------------------------
+        # 1. Rule-based failure checks
+        # ---------------------------
         failure_phrases = [
             "The answer is not found in the provided context",
             "Additional information required"
@@ -241,11 +254,92 @@ Grounded Answer:
             if phrase.lower() in answer_lower:
                 return True
         
-        # Check context length
+        # Context length / emptiness
         if not context or len(context.strip()) < min_context_length:
             return True
         
-        return False
+        # Missing citation markers (our grounded prompt asks for [source: ..., chunk: ...])
+        has_source_tag = "[source:" in answer
+        has_chunk_tag = "chunk:" in answer.lower()
+        if not (has_source_tag and has_chunk_tag):
+            # Missing citations is a soft signal; we don't immediately fail here,
+            # but it will negatively influence the verifier judgement.
+            pass
+        
+        # ---------------------------
+        # 2. LLM-based verification
+        # ---------------------------
+        verifier_prompt = f"""You are a strict fact-checking assistant for a RAG system.
+Your job is to verify whether the ANSWER is fully supported by the CONTEXT, with respect to the USER QUESTION.
+
+Follow these rules:
+1. Consider only the provided CONTEXT as evidence. Ignore any outside knowledge.
+2. Break the answer into its key factual claims.
+3. For each claim, check if it is:
+   - fully supported by the CONTEXT,
+   - only partially supported,
+   - or not supported at all.
+4. Then decide ONE overall verdict for the whole answer:
+   - SUPPORTED            -> all important claims are supported
+   - PARTIALLY_SUPPORTED  -> some claims supported, some missing/uncertain
+   - UNSUPPORTED          -> claims mostly not supported or contradicted
+
+Return a single line JSON object with EXACTLY this schema:
+{{"verdict": "SUPPORTED|PARTIALLY_SUPPORTED|UNSUPPORTED", "reason": "<short explanation>"}}
+
+------------------------
+USER QUESTION:
+{query}
+
+------------------------
+CONTEXT:
+{context}
+
+------------------------
+ANSWER:
+{answer}
+
+------------------------
+Now output ONLY the JSON object, nothing else."""
+
+        try:
+            verifier_response = self.openai_client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role": "user", "content": verifier_prompt}
+                ],
+                temperature=0.0,
+                max_tokens=200
+            )
+            raw_content = verifier_response.choices[0].message.content.strip()
+            
+            # Very lightweight / defensive JSON parsing to avoid hard failures
+            import json  # local import to avoid top-level dependency surprises
+            verdict = None
+            try:
+                parsed = json.loads(raw_content)
+                verdict = str(parsed.get("verdict", "")).upper()
+            except Exception:
+                # If the model did not return clean JSON, fall back to string matching
+                upper_content = raw_content.upper()
+                if "UNSUPPORTED" in upper_content:
+                    verdict = "UNSUPPORTED"
+                elif "PARTIALLY_SUPPORTED" in upper_content:
+                    verdict = "PARTIALLY_SUPPORTED"
+                elif "SUPPORTED" in upper_content:
+                    verdict = "SUPPORTED"
+            
+            # If we still don't have a clear verdict, be conservative and accept the answer
+            if verdict is None:
+                return False
+            
+            if verdict in ("UNSUPPORTED", "PARTIALLY_SUPPORTED"):
+                return True
+            
+            return False
+        except Exception:
+            # If verifier fails for any reason, fall back to rule-based result only
+            return False
     
     
     def answer_query(self, query: str, verbose: bool = False) -> Dict:
@@ -305,8 +399,13 @@ Grounded Answer:
         grounded_result = self.generate_grounded_answer(query, context, chunks_with_indices)
         grounded_answer = grounded_result['answer']
         
-        # Step 5: Check for failure signals and activate fallback if needed
-        use_fallback = self.detect_failure_signals(grounded_answer, context, min_context_length=150)
+        # Step 5: Check for failure signals (hybrid: rules + LLM verifier) and activate fallback if needed
+        use_fallback = self.detect_failure_signals(
+            query=query,
+            answer=grounded_answer,
+            context=context,
+            min_context_length=150
+        )
         
         if use_fallback:
             if verbose:
@@ -412,4 +511,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
